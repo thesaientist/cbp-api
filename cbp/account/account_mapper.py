@@ -1,4 +1,4 @@
-import json, hmac, hashlib, time, requests, base64
+import json, hmac, hashlib, time, requests, base64, urllib
 import datetime,re, time, math, copy, random
 from dateutil import parser
 import pandas as pd
@@ -70,14 +70,18 @@ class account_data_mapper:
             'CB-ACCESS-PASSPHRASE': self.passphrase
         }
 
-    async def get(self, path):
+    async def get(self, path='/', params=None):
+        if not params:
+            params = {}
+        qs = '?{}'.format(urllib.parse.urlencode(params, safe=':')) if params else ''
+        url = self.url + path + qs
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.url + path, headers=self._get_auth_headers(path)) as resp:
+            async with session.get(url, headers=self._get_auth_headers(path + qs)) as resp:
                 # store the retrieved list of JSON objects in 'data' variable
                 data = await resp.json()
         return data
 
-    async def async_get_account_balances(self):
+    async def get_account_balances(self):
         path = '/accounts'
         r = await self.get(path)
         accts = pd.DataFrame(r, dtype=float)
@@ -85,20 +89,14 @@ class account_data_mapper:
         accts = accts.sort_values(by='available', ascending=False)
         return accts
 
-    # def get_account_balances(self):
-    #     r = requests.get(self.url + 'accounts', auth=self.auth)
-    #     accts = pd.DataFrame(r.json(), dtype=float)
-    #     accts = accts[accts.balance != 0.0]
-    #     accts = accts.sort_values(by='available', ascending=False)
-    #     return accts
-
-    def get_account_history(self, product):
+    async def get_account_history(self, product):
+        path = '/accounts/' + AID_MAP[product] + '/ledger'
         try:
-            r = requests.get(self.url + 'accounts/' + AID_MAP[product] + '/ledger', auth=self.auth)
+            r = await self.get(path)
         except KeyError:
             print('Error: The account ID map does not contain the specific asset key provided as argument! Please check the key is correct and if needed modify the AID map.')
             return
-        acc_hist = pd.DataFrame(r.json(), dtype=float)
+        acc_hist = pd.DataFrame(r, dtype=float)
         if len(acc_hist) != 0:
             acc_hist.loc[:,'created_at'] = pd.to_datetime(acc_hist.created_at)
             return acc_hist
@@ -106,17 +104,19 @@ class account_data_mapper:
             print('There is no account history for selected asset on this account.')
             return
 
-    def get_order_history(self, product):
-        r = requests.get(self.url + 'fills', params={'product_id': product+'-USD'}, auth=self.auth)
-        fills = pd.DataFrame(r.json())
+    async def get_order_history(self, product):
+        path = '/fills'
+        params = {'product_id': product+'-USD'}
+        r = await self.get(path, params)
+        fills = pd.DataFrame(r)
         fills.loc[:,'created_at'] = pd.to_datetime(fills.created_at)
         return fills
 
-    def get_avg_cost(self, product):
-        hist = self.get_account_history(product)
+    async def get_avg_cost(self, product):
+        hist = await self.get_account_history(product)
         if hist is not None:
             idx = hist.index[hist.balance.astype(np.float) == 0].tolist()
-            fills = self.get_order_history(product)
+            fills = await self.get_order_history(product)
             if len(idx) == 0:
                 lfills = fills
             else:
@@ -134,14 +134,14 @@ class account_data_mapper:
             print('There is no account history for selected asset on this account.')
             return
 
-    def get_current_position(self, product):
-        accts = self.get_account_balances()
+    async def get_current_position(self, product):
+        accts = await self.get_account_balances()
         if product not in accts.currency.tolist():
             print(f"Error: It looks like you currently don't own any balance of {product}. Please check your account balances.")
             return
         bal = accts.loc[accts.currency == product, 'balance'].astype(np.float).iloc[0]
-        vwap = self.get_avg_cost(product)
-        price = get_market_price(product)
+        vwap = await self.get_avg_cost(product)
+        price = await self.get_market_price(product)
         position = {
             'Asset': product,
             'Balance': bal,
@@ -154,17 +154,17 @@ class account_data_mapper:
         }
         return position
 
-    def get_all_positions(self):
-        accts = self.get_account_balances()
+    async def get_all_positions(self):
+        accts = await self.get_account_balances()
         if len(accts) == 0:
             print('Currently, there are no assets on the account.')
             return
         assets = accts.currency.tolist()
         assets.remove('USD')
-        positions = []
-        for asset in assets:
-            pos_rec = self.get_current_position(asset)
-            positions.append(pos_rec)
+        positions = await asyncio.gather(*[self.get_current_position(asset) for asset in assets])
+        # for asset in assets:
+        #     pos_rec = self.get_current_position(asset)
+        #     positions.append(pos_rec)
         df = pd.DataFrame(positions)
         tot_value = df['Market Value'].sum()
         tot_cost = df['Cost Basis'].sum()
@@ -182,8 +182,8 @@ class account_data_mapper:
         df = df.append(total, ignore_index=True)
         return df
 
-
-def get_market_price(product):
-    r = requests.get(url + 'products/' + product + '-USD/ticker')
-    price = np.float(r.json()['price'])
-    return price
+    async def get_market_price(self, product):
+        path = '/products/' + product + '-USD/ticker'
+        r = await self.get(path)
+        price = np.float(r['price'])
+        return price
