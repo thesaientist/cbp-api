@@ -2,6 +2,12 @@
 This is a set of methods to better manage your assets and positions on Coinbase Pro. I created this initially because CBP does not show an overall gain/loss
 on each position you've taken, so I decided to use the CBP API to create something for myself.
 
+## Python dependencies
+This requires Python 3.x. Python 2.x will NOT work.
+You need these following packages installed: `pandas`, `numpy`, `asyncio`, `ssl`, `aiohttp`. Please install them with your `pip` package installer, e.g.
+
+`pip install pandas`
+
 ## To install
 `git clone https://github.com/thesaientist/cbp-api`
 
