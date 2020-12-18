@@ -17,7 +17,7 @@ async def main():
     while True:
         df = await adm.get_all_positions()
         placeholder.write(df.style.format({'Balance': "{:.2f}", 'Market Price': "{:.2f}", 'Market Value': "{:.2f}", 'Unit Cost': "{:.2f}", 'Cost Basis': "{:.2f}", 'Gain/Loss': "{:.2f}", 'Pct Gain/Loss': "{:.1f}"}))
-        time.sleep(5)
+        time.sleep(1)
         # session.run_id += 1
 
 if __name__ == '__main__':
