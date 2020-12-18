@@ -171,10 +171,10 @@ class account_data_mapper:
         net_gain = df['Gain/Loss'].sum()
         total = {
             'Asset': 'Total Portfolio',
-            'Balance': '',
-            'Market Price': '',
+            # 'Balance': '',
+            # 'Market Price': '',
             'Market Value': tot_value,
-            'Unit Cost': '',
+            # 'Unit Cost': '',
             'Cost Basis': tot_cost,
             'Gain/Loss': net_gain,
             'Pct Gain/Loss': net_gain/tot_cost*100
