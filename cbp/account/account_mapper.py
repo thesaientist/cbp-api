@@ -96,7 +96,21 @@ class account_data_mapper:
         except KeyError:
             print('Error: The account ID map does not contain the specific asset key provided as argument! Please check the key is correct and if needed modify the AID map.')
             return
-        acc_hist = pd.DataFrame(r, dtype=float)
+        attempts = 5
+        i = 0
+        while i < attempts:
+            try:
+                if i > 0:
+                    r = await self.get(path)
+                acc_hist = pd.DataFrame(r, dtype=float)
+                break
+            except ValueError:
+                i += 1
+                if i < attempts:
+                    time.sleep(0.5)
+                    continue
+                else:
+                    raise ValueError(f'There is an issue with accessing this account history! Please check {product} account keys and authorization.')
         if len(acc_hist) != 0:
             acc_hist.loc[:,'created_at'] = pd.to_datetime(acc_hist.created_at)
             return acc_hist
@@ -108,11 +122,25 @@ class account_data_mapper:
         path = '/fills'
         params = {'product_id': product+'-USD'}
         r = await self.get(path, params)
-        fills = pd.DataFrame(r)
+        attempts = 5
+        i = 0
+        while i < attempts:
+            try:
+                if i > 0:
+                    r = await self.get(path, params)
+                fills = pd.DataFrame(r)
+                break
+            except ValueError:
+                i += 1
+                if i < attempts:
+                    time.sleep(0.5)
+                    continue
+                else:
+                    raise ValueError(f'There is an issue with accessing this order history! Please check authorization and that there is an history of fills for this {product}.')
         fills.loc[:,'created_at'] = pd.to_datetime(fills.created_at)
         return fills
 
-    async def get_avg_cost(self, product):
+    async def get_cost_and_rlzd_gains(self, product):
         hist = await self.get_account_history(product)
         if hist is not None:
             idx = hist.index[hist.balance.astype(np.float) == 0].tolist()
@@ -122,35 +150,72 @@ class account_data_mapper:
             else:
                 last_zero_bal_time = hist.loc[idx[0], 'created_at']
                 lfills = fills[fills.created_at > last_zero_bal_time]
-            q = np.array(lfills['size'].astype(np.float) * np.where(lfills['side'] == 'buy', 1, -1))
-            p = np.array(lfills.price.astype(np.float))
-            try:
-                vwap = np.average(p, weights=q)
-                return vwap
-            except ZeroDivisionError:
-                print('Error: It looks like your current balance might be 0. Please check your account balance for this asset.')
+            lfills = lfills.sort_values(by='created_at')
+            quant = np.array(lfills['size'].astype(np.float) * np.where(lfills['side'] == 'buy', 1, -1))
+            if sum(quant) == 0:
+                raise ValueError('It looks like your current balance might be 0. Please check your account balance for this asset.')
                 return
+            rlzd = []
+            tot_cost = []
+            tot_spent = []
+            holding = []
+            avg_cost = []
+            for i, row in enumerate(lfills.itertuples()):
+                if i == 0:
+                    if row.side == 'buy':
+                        avg_cost.append(float(row.price))
+                        holding.append(float(row.size))
+                        tot_cost.append(avg_cost[0]*quant[0])
+                        rlzd.append(0.)
+                        tot_spent.append(tot_cost[0])
+                        continue
+                    else:
+                        raise ValueError('First fill in history is not a buy! Please check order history.')
+                p = float(row.price) if row.side == 'buy' else avg_cost[-1]
+                q = float(row.size) if row.side == 'buy' else -1.*float(row.size)
+                net_gain = -1.*float(row.fee) if row.side == 'buy' else float(row.size)*(float(row.price) - avg_cost[-1])-float(row.fee)
+                new_tot_cost = tot_cost[-1] + p*q
+                new_holding = holding[-1] + q
+                new_avg_cost = new_tot_cost/new_holding
+                current_spend = float(row.price) * float(row.size) if row.side == 'buy' else 0.
+                rlzd.append(net_gain)
+                tot_cost.append(new_tot_cost)
+                holding.append(new_holding)
+                avg_cost.append(new_avg_cost)
+                tot_spent.append(tot_spent[-1] + current_spend)
+            # sanity check (latest balance should match last element in holding)
+            bal_diff = abs(holding[-1] - hist.iloc[0]['balance'])/hist.iloc[0]['balance']*100
+            if bal_diff > 1:        # check if there is more than 1% difference
+                raise ValueError('Latest account balance does NOT match calculated latest holdings based on transaction history!')
+            return avg_cost[-1], sum(rlzd), tot_spent[-1]
         else:
             print('There is no account history for selected asset on this account.')
             return
 
     async def get_current_position(self, product):
+        # DEBUG
+        # print(f'Call to get_current_position() for product {product}')
         accts = await self.get_account_balances()
         if product not in accts.currency.tolist():
             print(f"Error: It looks like you currently don't own any balance of {product}. Please check your account balances.")
             return
         bal = accts.loc[accts.currency == product, 'balance'].astype(np.float).iloc[0]
-        vwap = await self.get_avg_cost(product)
+        avg_cost, rlzd_gains, spend = await self.get_cost_and_rlzd_gains(product)
         price = await self.get_market_price(product)
         position = {
             'Asset': product,
             'Balance': bal,
             'Market Price': price,
             'Market Value': bal*price,
-            'Unit Cost': vwap,
-            'Cost Basis': bal*vwap,
-            'Gain/Loss': bal*(price-vwap),
-            'Pct Gain/Loss': (price-vwap)/vwap*100
+            'Avg Cost': avg_cost,
+            'Cost Basis (CB)': bal*avg_cost,
+            'Unrlzd G/L': bal*(price-avg_cost),
+            'Pct Unrlzd G/L': (price-avg_cost)/avg_cost*100,
+            'Rlzd G/L': rlzd_gains,
+            'Total G/L': bal*(price-avg_cost)+rlzd_gains,
+            'Total CB': spend,
+            'Pct Total Return': (bal*(price-avg_cost)+rlzd_gains)/spend*100,
+            'Breakeven Price': avg_cost - rlzd_gains/bal
         }
         return position
 
@@ -159,25 +224,32 @@ class account_data_mapper:
         if len(accts) == 0:
             print('Currently, there are no assets on the account.')
             return
-        assets = accts.currency.tolist()
-        assets.remove('USD')
+        assets = accts[accts.currency != 'USD']['currency'].tolist()
+        # assets.remove('USD')
         positions = await asyncio.gather(*[self.get_current_position(asset) for asset in assets])
         # for asset in assets:
         #     pos_rec = self.get_current_position(asset)
         #     positions.append(pos_rec)
         df = pd.DataFrame(positions)
         tot_value = df['Market Value'].sum()
-        tot_cost = df['Cost Basis'].sum()
-        net_gain = df['Gain/Loss'].sum()
+        tot_cost = df['Cost Basis (CB)'].sum()
+        tot_unrlzd = df['Unrlzd G/L'].sum()
+        tot_rlzd = df['Rlzd G/L'].sum()
+        tot_gain = df['Total G/L'].sum()
+        tot_CB = df['Total CB'].sum()
         total = {
-            'Asset': 'Total Portfolio',
+            'Asset': 'Portfolio',
             # 'Balance': '',
             # 'Market Price': '',
             'Market Value': tot_value,
             # 'Unit Cost': '',
-            'Cost Basis': tot_cost,
-            'Gain/Loss': net_gain,
-            'Pct Gain/Loss': net_gain/tot_cost*100
+            'Cost Basis (CB)': tot_cost,
+            'Unrlzd G/L': tot_unrlzd,
+            'Pct Unrlzd G/L': tot_unrlzd/tot_cost*100,
+            'Rlzd G/L': tot_rlzd,
+            'Total G/L': tot_gain,
+            'Total CB': tot_CB,
+            'Pct Total Return': tot_gain/tot_CB*100
         }
         df = df.append(total, ignore_index=True)
         return df
